@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10131c" />
+    <title>NhacCuaTao</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand-row" href="#library" aria-label="NhacCuaTao home" data-view-link="library">
+          <span class="brand-logo" aria-hidden="true">♪</span>
+          <span class="brand-name">NhacCuaTao</span>
+        </a>
+
+        <button id="requestSongBtn" class="request-button" type="button">
+          <span aria-hidden="true">＋</span>
+          <span>Request song</span>
+        </button>
+
+        <nav class="sidebar-nav" aria-label="Music library">
+          <p class="nav-label">YOUR MUSIC</p>
+          <button class="nav-item active" type="button" data-view="library" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">▤</span><span>Library</span><span id="trackCount" class="nav-count">0</span>
+          </button>
+          <button class="nav-item" type="button" data-view="artists">
+            <span class="nav-icon" aria-hidden="true">♬</span><span>Artists</span>
+          </button>
+          <button class="nav-item" type="button" data-view="albums">
+            <span class="nav-icon" aria-hidden="true">▦</span><span>Albums</span>
+          </button>
+          <button class="nav-item" type="button" data-view="playlists">
+            <span class="nav-icon" aria-hidden="true">☷</span><span>Playlists</span><span id="playlistCount" class="nav-count">0</span>
+          </button>
+          <button class="nav-item" type="button" data-view="favorites">
+            <span class="nav-icon" aria-hidden="true">♡</span><span>Favorites</span><span id="favoriteCount" class="nav-count">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <span class="library-status-dot" aria-hidden="true"></span>
+          <span>Local library</span>
+          <span id="sidebarTrackCount" class="sidebar-track-count">0 tracks</span>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div class="page-heading">
+            <p id="viewEyebrow" class="eyebrow">YOUR COLLECTION</p>
+            <h1 id="viewTitle">Library</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="search-field" for="searchInput">
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Search your music" autocomplete="off" />
+              <kbd>/</kbd>
+            </label>
+            <button id="newPlaylistBtn" class="quiet-button" type="button" hidden>＋ New playlist</button>
+          </div>
+        </header>
+
+        <section id="mainContent" class="main-content" aria-live="polite"></section>
+      </main>
+
+      <footer class="player-dock" aria-label="Music player">
+        <div class="dock-track">
+          <div id="albumArt" class="dock-art" aria-label="Album art"><span aria-hidden="true">♪</span></div>
+          <div class="dock-track-copy">
+            <h2 id="trackTitle">No song selected</h2>
+            <p id="trackArtist">Choose a track from your library</p>
+            <span id="audioQualityBadge" class="audio-quality-badge" aria-live="polite" hidden></span>
+          </div>
+        </div>
+
+        <div class="dock-playback">
+          <div class="controls-row">
+            <button id="shuffleBtn" class="control-btn" type="button" aria-label="Shuffle" title="Shuffle">⇄</button>
+            <button id="prevBtn" class="control-btn" type="button" aria-label="Previous track" title="Previous">⏮</button>
+            <button id="playPauseBtn" class="play-btn" type="button" aria-label="Play" title="Play">▶</button>
+            <button id="nextBtn" class="control-btn" type="button" aria-label="Next track" title="Next">⏭</button>
+            <button id="repeatBtn" class="control-btn" type="button" aria-label="Repeat" title="Repeat">↻</button>
+          </div>
+          <div class="time-row">
+            <span id="currentTime">0:00</span>
+            <input id="progressSlider" type="range" min="0" max="100" value="0" aria-label="Playback position" />
+            <span id="totalTime">0:00</span>
+          </div>
+        </div>
+
+        <div class="dock-volume">
+          <span aria-hidden="true">◖</span>
+          <input id="volumeSlider" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="Volume" />
+          <span id="volumeValue">80%</span>
+        </div>
+      </footer>
+    </div>
+
+    <dialog id="requestDialog" class="app-dialog">
+      <form id="requestForm" method="dialog">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">COMMUNITY QUEUE</p><h2>Request a song</h2></div>
+          <button class="dialog-close" type="button" data-close-dialog="requestDialog" aria-label="Close">×</button>
+        </div>
+        <label class="form-field">Song title<input name="title" required maxlength="200" placeholder="What should we add?" /></label>
+        <label class="form-field">Artist<input name="artist" required maxlength="160" placeholder="Artist or band" /></label>
+        <label class="form-field">Notes<textarea name="notes" rows="4" maxlength="1200" placeholder="YouTube / Spotify link, preferred edition, Hi-Res quality..."></textarea></label>
+        <p id="requestFormMessage" class="form-message" role="status"></p>
+        <div class="dialog-actions"><button class="quiet-button" type="button" data-close-dialog="requestDialog">Cancel</button><button class="primary-button" type="submit">Send request</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="playlistDialog" class="app-dialog app-dialog-small">
+      <form id="playlistForm" method="dialog">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">YOUR COLLECTION</p><h2>Create playlist</h2></div>
+          <button class="dialog-close" type="button" data-close-dialog="playlistDialog" aria-label="Close">×</button>
+        </div>
+        <label class="form-field">Playlist name<input name="name" required maxlength="100" placeholder="Late night drive" /></label>
+        <div class="dialog-actions"><button class="quiet-button" type="button" data-close-dialog="playlistDialog">Cancel</button><button class="primary-button" type="submit">Create</button></div>
+      </form>
+    </dialog>
+
+    <div id="contextMenu" class="context-menu" role="menu" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <audio id="audioPlayer" preload="metadata"></audio>
+
+    <script src="config.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>

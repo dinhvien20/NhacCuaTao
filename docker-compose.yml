@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: nhaccuato-backend
+    ports:
+      - "5000:5000"
+    environment:
+      PORT: 5000
+    volumes:
+      - ./backend/storage:/app/storage
+
+  frontend:
+    image: python:3.11-slim
+    container_name: nhaccuato-frontend
+    working_dir: /app
+    command: python -m http.server 8080 --directory /app/frontend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app/frontend

@@ -292,7 +292,7 @@ def get_audio_quality(path: Path):
         "channels": None,
         "duration_seconds": None,
         "lossless": None,
-        "file_size_bytes": path.stat().st_size,
+        "file_size_bytes": path.stat().st_size if path.exists() else 0,
     }
     if MutagenFile is None:
         return result
@@ -328,7 +328,7 @@ def get_audio_quality(path: Path):
     duration = getattr(info, "length", None)
     if duration:
         result["duration_seconds"] = float(duration)
-        if result["bitrate_kbps"] is None:
+        if result["bitrate_kbps"] is None and path.exists():
             result["bitrate_kbps"] = round(path.stat().st_size * 8 / duration / 1000)
 
     if result["codec"]:
@@ -344,11 +344,13 @@ def get_audio_quality(path: Path):
 def is_alac_file(path: Path) -> bool:
     if path.suffix.lower() not in {".m4a", ".alac"}:
         return False
+    if path.suffix.lower() == ".alac":
+        return True
+    if bool(re.search(r"\bALAC\b", path.stem, flags=re.I)):
+        return True
     quality = get_audio_quality(path)
     codec = (quality.get("codec") or "").lower()
-    return "alac" in codec or path.suffix.lower() == ".alac" or bool(
-        re.search(r"\bALAC\b", path.stem, flags=re.I)
-    )
+    return "alac" in codec
 
 
 def find_cover_for_track(track_path: Path):
@@ -520,6 +522,31 @@ class MusicHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Range")
         self.end_headers()
 
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path.startswith("/api/stream/"):
+            track_id = path.split("/api/stream/", 1)[1]
+            target = find_track_by_id(track_id)
+            if target is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_size = target.stat().st_size
+            mime_type = AUDIO_MIME_TYPES.get(target.suffix.lower(), "audio/mp4")
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Range")
+            self.send_header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Range, Content-Length")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
     def log_message(self, format, *args):
         return
 
@@ -592,7 +619,17 @@ class MusicHandler(BaseHTTPRequestHandler):
             if target is None:
                 send_json(self, 404, {"error": "Track not found"})
                 return
-            if is_alac_file(target):
+            query_params = parse_qs(parsed.query)
+            force_direct = (
+                query_params.get("direct", ["0"])[0] in {"1", "true"}
+                or query_params.get("raw", ["0"])[0] in {"1", "true"}
+            )
+            user_agent = self.headers.get("User-Agent", "")
+            is_apple_native = bool(
+                re.search(r"\b(iPhone|iPad|iPod|Macintosh)\b", user_agent)
+                and not re.search(r"\b(Chrome|Chromium|CriOS|Android)\b", user_agent)
+            )
+            if is_alac_file(target) and not force_direct and not is_apple_native:
                 send_transcoded_flac_response(self, target)
                 return
             send_file_response(self, target)

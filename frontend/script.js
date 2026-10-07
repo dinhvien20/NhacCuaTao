@@ -380,12 +380,258 @@ const syncPlaybackUI = () => {
   repeatBtn.classList.toggle('active', state.repeat);
 };
 
+const supportsNativeAlac = () => {
+  const tester = document.createElement('audio');
+  const canPlay = tester.canPlayType('audio/mp4; codecs="alac"') || tester.canPlayType('audio/alac');
+  if (canPlay === 'probably' || canPlay === 'maybe') return true;
+  const isApple = /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && !/Chrome|Chromium|CriOS|Android/.test(navigator.userAgent);
+  if (isApple && (tester.canPlayType('audio/mp4') || tester.canPlayType('audio/x-m4a'))) {
+    return true;
+  }
+  return false;
+};
+
+const isTrackAlac = (track) => {
+  if (!track) return false;
+  const quality = state.audioQualityByTrackId.get(track.id);
+  if (quality?.codec && quality.codec.toLowerCase().includes('alac')) return true;
+  if (quality?.format && quality.format.toUpperCase() === 'ALAC') return true;
+  if (track.format === 'alac') return true;
+  if ((track.format === 'm4a' || track.filename?.endsWith('.m4a')) && /\[ALAC\]|\bALAC\b/i.test(track.filename || track.quality || '')) return true;
+  return false;
+};
+
+class AlacWebAudioPlayer {
+  constructor() {
+    this.ctx = null;
+    this.gainNode = null;
+    this.sourceNode = null;
+    this.bufferCache = new Map();
+    this.currentTrackId = null;
+    this.currentBuffer = null;
+    this.duration = 0;
+    this.startTime = 0;
+    this.startOffset = 0;
+    this.isPlaying = false;
+    this.abortController = null;
+    this.animFrameId = null;
+  }
+
+  initContext() {
+    if (!this.ctx) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AudioCtx();
+      this.gainNode = this.ctx.createGain();
+      this.gainNode.gain.setValueAtTime(state.volume, this.ctx.currentTime);
+      this.gainNode.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+    return this.ctx;
+  }
+
+  setVolume(vol) {
+    if (this.gainNode && this.ctx) {
+      this.gainNode.gain.setValueAtTime(vol, this.ctx.currentTime);
+    }
+  }
+
+  stopSource() {
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.onended = null;
+        this.sourceNode.stop();
+        this.sourceNode.disconnect();
+      } catch (_) {}
+      this.sourceNode = null;
+    }
+    this.cancelProgress();
+  }
+
+  stop() {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+    this.stopSource();
+    this.isPlaying = false;
+    this.startOffset = 0;
+  }
+
+  pause() {
+    if (this.isPlaying && this.ctx) {
+      this.startOffset = Math.min(this.getCurrentTime(), this.duration);
+      this.stopSource();
+      this.isPlaying = false;
+      state.isPlaying = false;
+      syncPlaybackUI();
+    }
+  }
+
+  resume() {
+    if (this.currentBuffer && !this.isPlaying) {
+      this.initContext();
+      this.playFromOffset(this.startOffset);
+    }
+  }
+
+  seek(targetSeconds) {
+    if (this.currentBuffer) {
+      this.startOffset = Math.max(0, Math.min(targetSeconds, this.duration));
+      if (this.isPlaying) {
+        this.stopSource();
+        this.playFromOffset(this.startOffset);
+      } else {
+        currentTimeEl.textContent = formatTime(this.startOffset);
+        if (this.duration > 0) {
+          progressSlider.value = String((this.startOffset / this.duration) * 100);
+        }
+      }
+    }
+  }
+
+  getCurrentTime() {
+    if (!this.ctx || !this.isPlaying) return this.startOffset;
+    return Math.min((this.ctx.currentTime - this.startTime) + this.startOffset, this.duration);
+  }
+
+  playFromOffset(offset) {
+    this.initContext();
+    this.stopSource();
+
+    this.startOffset = offset;
+    this.startTime = this.ctx.currentTime;
+    this.sourceNode = this.ctx.createBufferSource();
+    this.sourceNode.buffer = this.currentBuffer;
+    this.sourceNode.connect(this.gainNode);
+
+    this.sourceNode.onended = () => {
+      const pos = this.getCurrentTime();
+      if (this.isPlaying && pos >= this.duration - 0.3) {
+        if (state.repeat) {
+          this.playFromOffset(0);
+          return;
+        }
+        this.isPlaying = false;
+        state.isPlaying = false;
+        syncPlaybackUI();
+        this.cancelProgress();
+        nextTrack();
+      }
+    };
+
+    this.sourceNode.start(0, this.startOffset);
+    this.isPlaying = true;
+    state.isPlaying = true;
+    syncPlaybackUI();
+    this.startProgress();
+  }
+
+  startProgress() {
+    this.cancelProgress();
+    const update = () => {
+      if (this.isPlaying && this.duration > 0) {
+        const cur = this.getCurrentTime();
+        currentTimeEl.textContent = formatTime(cur);
+        progressSlider.value = String((cur / this.duration) * 100);
+        this.animFrameId = requestAnimationFrame(update);
+      }
+    };
+    this.animFrameId = requestAnimationFrame(update);
+  }
+
+  cancelProgress() {
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
+    }
+  }
+
+  async loadAndDecode(track) {
+    this.stop();
+    this.currentTrackId = track.id;
+
+    if (this.bufferCache.has(track.id)) {
+      this.currentBuffer = this.bufferCache.get(track.id);
+      this.duration = this.currentBuffer.duration;
+      totalTimeEl.textContent = formatTime(this.duration);
+      progressSlider.max = '100';
+      audioQualityBadge.textContent = '[LOSSLESS] ALAC (Web Audio PCM)';
+      audioQualityBadge.hidden = false;
+      this.playFromOffset(0);
+      return;
+    }
+
+    if (typeof window.AV === 'undefined') {
+      throw new Error('Aurora.js (AV) decoder is not loaded. Please verify vendor/aurora.js.');
+    }
+
+    toastMessage('Downloading ALAC file for client-side decoding...');
+    audioQualityBadge.textContent = 'Downloading ALAC...';
+    audioQualityBadge.hidden = false;
+
+    this.abortController = new AbortController();
+    const streamUrl = `${getStreamUrl(track.id)}?direct=1`;
+    const response = await fetch(streamUrl, { signal: this.abortController.signal });
+    if (!response.ok) {
+      throw new Error(`Failed to download audio file (${response.status})`);
+    }
+
+    audioQualityBadge.textContent = 'Decoding ALAC to PCM...';
+    const arrayBuffer = await response.arrayBuffer();
+
+    return new Promise((resolve, reject) => {
+      const asset = window.AV.Asset.fromBuffer(arrayBuffer);
+      asset.on('error', (err) => {
+        reject(new Error(typeof err === 'string' ? err : err?.message || 'Decoder failed'));
+      });
+
+      asset.decodeToBuffer((pcmData) => {
+        try {
+          const sampleRate = asset.format?.sampleRate || 44100;
+          const channels = asset.format?.channelsPerFrame || 2;
+          const numFrames = Math.floor(pcmData.length / channels);
+
+          const ctx = this.initContext();
+          const audioBuf = ctx.createBuffer(channels, numFrames, sampleRate);
+
+          for (let ch = 0; ch < channels; ch++) {
+            const channelArray = audioBuf.getChannelData(ch);
+            for (let i = 0, j = ch; i < numFrames; i++, j += channels) {
+              channelArray[i] = pcmData[j];
+            }
+          }
+
+          this.bufferCache.set(track.id, audioBuf);
+          this.currentBuffer = audioBuf;
+          this.duration = audioBuf.duration;
+          totalTimeEl.textContent = formatTime(this.duration);
+          progressSlider.max = '100';
+
+          audioQualityBadge.textContent = `[LOSSLESS] ALAC • ${channels}ch / ${(sampleRate / 1000).toLocaleString('en-US')}kHz (Web Audio)`;
+          audioQualityBadge.hidden = false;
+
+          this.playFromOffset(0);
+          resolve();
+        } catch (convErr) {
+          reject(convErr);
+        }
+      });
+    });
+  }
+}
+
+const alacPlayer = new AlacWebAudioPlayer();
+let playbackEngine = 'native';
+
 const logPlaybackError = (error) => {
   console.error('Playback error detail:', error);
   const quality = state.audioQualityByTrackId.get(state.selectedTrackId);
   if (error?.name === 'NotSupportedError' && quality?.codec?.toLowerCase().includes('alac')) {
-    console.warn('This browser cannot decode ALAC. This track is being streamed unchanged.');
+    console.warn('This browser cannot decode ALAC. Client-side decoding should be activated.');
   }
+  toastMessage(`Playback error: ${error?.message || error?.name || 'Cannot play this track'}`);
 };
 
 const playQueueIndex = (index) => {
@@ -394,15 +640,37 @@ const playQueueIndex = (index) => {
   const track = getTrackById(state.currentQueue[index]);
   if (!track) return;
   state.selectedTrackId = track.id;
-  audio.src = getStreamUrl(track.id);
-  audio.load();
   updatePlayerMeta();
   renderView();
-  audio.play().catch((error) => {
-    state.isPlaying = false;
-    syncPlaybackUI();
-    logPlaybackError(error);
-  });
+
+  const isAlac = isTrackAlac(track);
+  const nativeAlac = supportsNativeAlac();
+
+  if (isAlac && !nativeAlac) {
+    audio.pause();
+    audio.removeAttribute('src');
+    playbackEngine = 'alac-webaudio';
+
+    alacPlayer.loadAndDecode(track).catch((err) => {
+      console.error('ALAC Web Audio decode error:', err);
+      toastMessage(`Client ALAC decode failed: ${err.message}. Trying direct stream...`);
+      playbackEngine = 'native';
+      audio.src = `${getStreamUrl(track.id)}?direct=1`;
+      audio.load();
+      audio.play().catch(logPlaybackError);
+    });
+  } else {
+    alacPlayer.stop();
+    playbackEngine = 'native';
+    const streamUrl = isAlac ? `${getStreamUrl(track.id)}?direct=1` : getStreamUrl(track.id);
+    audio.src = streamUrl;
+    audio.load();
+    audio.play().catch((error) => {
+      state.isPlaying = false;
+      syncPlaybackUI();
+      logPlaybackError(error);
+    });
+  }
 };
 
 const setQueueAndPlay = (tracks, startTrackId = null, shuffle = false) => {
@@ -429,6 +697,8 @@ const nextTrack = () => {
   if (state.queueIndex + 1 < state.currentQueue.length) playQueueIndex(state.queueIndex + 1);
   else if (state.repeat) playQueueIndex(0);
   else {
+    if (playbackEngine === 'alac-webaudio') alacPlayer.stop();
+    else audio.pause();
     state.isPlaying = false;
     syncPlaybackUI();
   }
@@ -436,8 +706,10 @@ const nextTrack = () => {
 
 const previousTrack = () => {
   if (!state.currentQueue.length) return;
-  if (audio.currentTime > 3) {
-    audio.currentTime = 0;
+  const currentPos = playbackEngine === 'alac-webaudio' ? alacPlayer.getCurrentTime() : audio.currentTime;
+  if (currentPos > 3) {
+    if (playbackEngine === 'alac-webaudio') alacPlayer.seek(0);
+    else audio.currentTime = 0;
     return;
   }
   playQueueIndex(Math.max(0, state.queueIndex - 1));
@@ -453,14 +725,17 @@ const hideFromQueue = (trackId) => {
   state.currentQueue.splice(removedIndex, 1);
   state.hiddenTrackIds.add(trackId);
   if (wasPlaying) {
-    audio.pause();
+    if (playbackEngine === 'alac-webaudio') alacPlayer.stop();
+    else {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
     state.isPlaying = false;
     state.queueIndex = Math.min(removedIndex, state.currentQueue.length - 1);
     if (state.queueIndex >= 0) playQueueIndex(state.queueIndex);
     else {
       state.selectedTrackId = null;
-      audio.removeAttribute('src');
-      audio.load();
       updatePlayerMeta();
     }
   } else if (removedIndex < state.queueIndex) {
@@ -538,8 +813,12 @@ const loadCollections = async () => {
     state.selectedTrackId = state.tracks[0].id;
     state.currentQueue = state.tracks.map((track) => track.id);
     state.queueIndex = 0;
-    audio.src = getStreamUrl(state.selectedTrackId);
-    audio.load();
+    const initialTrack = state.tracks[0];
+    if (!isTrackAlac(initialTrack) || supportsNativeAlac()) {
+      const directParam = isTrackAlac(initialTrack) ? '?direct=1' : '';
+      audio.src = `${getStreamUrl(state.selectedTrackId)}${directParam}`;
+      audio.load();
+    }
     updatePlayerMeta();
   }
   renderView();
@@ -720,8 +999,16 @@ document.addEventListener('keydown', (event) => {
 
 playPauseBtn.addEventListener('click', () => {
   if (!state.selectedTrackId) return;
-  if (audio.paused) audio.play().catch(logPlaybackError);
-  else audio.pause();
+  if (playbackEngine === 'alac-webaudio') {
+    if (alacPlayer.isPlaying) {
+      alacPlayer.pause();
+    } else {
+      alacPlayer.resume();
+    }
+  } else {
+    if (audio.paused) audio.play().catch(logPlaybackError);
+    else audio.pause();
+  }
 });
 prevBtn.addEventListener('click', previousTrack);
 nextBtn.addEventListener('click', nextTrack);
@@ -740,36 +1027,61 @@ repeatBtn.addEventListener('click', () => {
   syncPlaybackUI();
 });
 progressSlider.addEventListener('input', () => {
-  if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
-  audio.currentTime = (Number(progressSlider.value) / 100) * audio.duration;
+  const fraction = Number(progressSlider.value) / 100;
+  if (playbackEngine === 'alac-webaudio') {
+    if (alacPlayer.duration > 0) {
+      alacPlayer.seek(fraction * alacPlayer.duration);
+    }
+  } else {
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    audio.currentTime = fraction * audio.duration;
+  }
 });
 volumeSlider.addEventListener('input', () => {
   state.volume = Number(volumeSlider.value);
   audio.volume = state.volume;
+  alacPlayer.setVolume(state.volume);
   volumeValue.textContent = `${Math.round(state.volume * 100)}%`;
 });
 audio.addEventListener('loadedmetadata', () => {
-  if (Number.isFinite(audio.duration)) {
+  if (playbackEngine === 'native' && Number.isFinite(audio.duration)) {
     totalTimeEl.textContent = formatTime(audio.duration);
     progressSlider.max = '100';
   }
 });
 audio.addEventListener('timeupdate', () => {
-  currentTimeEl.textContent = formatTime(audio.currentTime);
-  if (Number.isFinite(audio.duration) && audio.duration > 0) progressSlider.value = String((audio.currentTime / audio.duration) * 100);
+  if (playbackEngine === 'native') {
+    currentTimeEl.textContent = formatTime(audio.currentTime);
+    if (Number.isFinite(audio.duration) && audio.duration > 0) progressSlider.value = String((audio.currentTime / audio.duration) * 100);
+  }
 });
-audio.addEventListener('play', () => { state.isPlaying = true; syncPlaybackUI(); });
-audio.addEventListener('pause', () => { state.isPlaying = false; syncPlaybackUI(); });
+audio.addEventListener('play', () => {
+  if (playbackEngine === 'native') {
+    state.isPlaying = true;
+    syncPlaybackUI();
+  }
+});
+audio.addEventListener('pause', () => {
+  if (playbackEngine === 'native') {
+    state.isPlaying = false;
+    syncPlaybackUI();
+  }
+});
 audio.addEventListener('ended', nextTrack);
 audio.addEventListener('error', () => {
-  state.isPlaying = false;
-  syncPlaybackUI();
-  console.error('Audio source error:', audio.error);
+  if (playbackEngine === 'native') {
+    state.isPlaying = false;
+    syncPlaybackUI();
+    const errCode = audio.error ? `Code ${audio.error.code}: ${audio.error.message || 'Media source error'}` : 'Unknown audio error';
+    console.error('Audio source error:', audio.error);
+    toastMessage(`Audio playback error (${errCode})`);
+  }
 });
 
 volumeSlider.value = String(state.volume);
 volumeValue.textContent = `${Math.round(state.volume * 100)}%`;
 audio.volume = state.volume;
+alacPlayer.setVolume(state.volume);
 syncPlaybackUI();
 renderView();
 loadCollections().catch((error) => {
